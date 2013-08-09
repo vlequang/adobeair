@@ -1,0 +1,671 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:WindowedApplication xmlns:fx="http://ns.adobe.com/mxml/2009"
+					   xmlns:s="library://ns.adobe.com/flex/spark"
+					   xmlns:mx="library://ns.adobe.com/flex/halo"
+					   applicationComplete="init()" backgroundAlpha="0" title="Mini AIR Web Server">
+	<s:layout>
+		<s:VerticalLayout paddingTop="8" paddingLeft="8" paddingRight="8" paddingBottom="8"/>
+	</s:layout>
+	
+	<fx:Declarations>
+		<fx:String id="htmlCam">
+			<![CDATA[
+				<html>
+				<head>
+				</head>
+				<script>
+					function init() {
+						var frames=0,t=0;
+						var img = document.getElementById("cam");
+						var timeout=0,timeout2=0,delay=10,client=new Date().getTime()+""+Math.random();
+						function refresh(cam) {
+							clearTimeout(timeout);
+							clearTimeout(timeout2);
+							var f=function(){
+								cam.src=cam.src.split('?')[0]+'?client='+client+'&t='+new Date().getTime()+(window.location.search.indexOf("?")==0?"&"+window.location.search.substr(1):"");
+							};
+							timeout=setTimeout(f,delay);
+							timeout2=setTimeout(f,delay*10);	//	catch up, in case the first try breaks
+							var now=new Date().getTime();
+							frames++;
+							if(now-t>200) {
+								document.title=frames/(now-t)*1000+"";
+								frames=0;
+								t=now;
+							}
+						}
+						img.onload = function() {
+							delay=10; 
+							refresh(this);
+						};
+						img.onerror = function() {
+							delay=Math.min(2000,delay*2);
+							refresh(this);
+						};
+						img.src="camsrc";
+					}
+				</script>
+				<body onload="init()">
+					<img id="cam" style="width:100%;height:auto">
+				</body>
+				</html>
+			]]>
+		</fx:String>
+		<fx:String id="htmlApp">
+			<![CDATA[
+				<html>
+				<head><title>MiServer</title>
+				<script language="javascript">
+					var xmlhttp;
+					var inprogress = false;
+					if (window.XMLHttpRequest)
+					{
+						xmlhttp=new XMLHttpRequest();
+					}
+					else
+					{	
+						xmlhttp=new ActiveXObject("Microsoft.XMLHTTP");
+					}
+			
+					xmlhttp.onreadystatechange=function()
+					{
+						if (xmlhttp.readyState==4 && xmlhttp.status==200)
+						{
+							inprogress = false;
+							if(lastEvent) {
+								handleEvent(lastEvent);
+							}
+						}
+					}			
+			
+					var lastEvent;
+					function handleMouse(event) {
+						lastEvent = event;
+						handleEvent(event);
+						event.preventDefault();
+					}
+			
+					var lastMouse = null;
+					function handleEvent(e) {
+						if(lastMouse && e.type=="touchmove") {
+							if(!inprogress) {
+								inprogress = true;
+								var params = [e.touches[0].screenX-lastMouse.x,e.touches[0].screenY-lastMouse.y].join(",");
+	//							var params = parseInt(1000*e.changedTouches[0].screenX/window.innerWidth)+","+parseInt(1000*e.changedTouches[0].screenY/window.innerHeight);
+								xmlhttp.open("POST","?",true);
+								xmlhttp.setRequestHeader("Content-type","application/x-www-form-urlencoded");
+								xmlhttp.send(params);
+							}
+						}
+						lastMouse = {x:e.touches[0].screenX,y:e.touches[0].screenY};
+						lastEvent = null;
+					}
+
+					//window.addEventListener("mousemove",handleMouse,true);
+					document.addEventListener("touchmove",handleMouse,false);
+					document.addEventListener("touchstart",handleMouse,false);
+				</script>
+				</head>
+				<body>
+				</body>
+				</html>
+			]]>
+		</fx:String>
+		
+	</fx:Declarations>
+	
+	<fx:Script>
+		<![CDATA[
+			import com.adobe.net.MimeTypeMap;
+			
+			import flash.events.Event;
+			import flash.events.ProgressEvent;
+			import flash.events.ServerSocketConnectEvent;
+			import flash.filters.GlowFilter;
+			import flash.net.ServerSocket;
+			import flash.net.Socket;
+			import flash.utils.ByteArray;
+			
+			import mx.controls.Alert;
+			import mx.graphics.codec.IImageEncoder;
+			import mx.graphics.codec.PNGEncoder;
+			
+			import org.bytearray.image.JPGEncoder;
+			
+			[Bindable]private var serverSocket:ServerSocket;
+			
+			private var mimeTypeMap:MimeTypeMap;
+			
+			private var camera:Camera;
+			private var video:Video;
+			private var cambmp:BitmapData;
+			private var cambmp2:BitmapData;
+			private var encoder:IImageEncoder;
+			private var imgbytes:ByteArray;
+			private var lasttaken:Number=0;
+			private var attachTimer:Timer;
+			private var tf:TextField;
+			private var combo:Sprite;
+			private var jpg:JPGEncoder;
+			private var png:PNGEncoder;
+			private var camerasize:String = "240x150";
+			private var quality:int = 70;
+			private var clients:Object = {};
+			private var numclients:int= 0;
+			private var crash:Boolean = false;
+			private var sleep:int = 50;
+			private var accuserver:Number=0;
+			
+			static private const CAMERA_FRAMERATE:int = 30;
+			
+			private function init():void
+			{
+				mimeTypeMap = new MimeTypeMap();
+				stage.nativeWindow.maximize();
+//				stage.displayState = StageDisplayState.FULL_SCREEN;
+//				stage.nativeWindow.alwaysInFront = true;
+//				stage.nativeWindow.orderToFront();
+				var zoom:Number = 3;
+				stage.frameRate= 200;
+				camera = Camera.getCamera();
+				resetCamera();
+				attachTimer = new Timer(3000,1);
+				attachTimer.addEventListener(TimerEvent.TIMER_COMPLETE,stopCamera);
+				combo = new Sprite();
+				tf = new TextField();
+				tf.multiline= true;
+				tf.filters = [new GlowFilter(0xFFFFFF,1,2,2,10)];
+				jpg = new JPGEncoder(quality);
+				png = new PNGEncoder();
+//				combo.addChild(tf);
+				encoder = jpg;
+				crash = false;
+			}
+			
+			private function resetCamera():void {
+				var size:Array = camerasize.split("x");
+				if(camera)
+					camera.setMode(size[0],size[1],CAMERA_FRAMERATE);
+			}
+			
+			private function stopCamera(e:TimerEvent):void {
+				video.attachCamera(null);
+				if(attachTimer.running)
+					attachTimer.stop();
+			}
+			
+			private function listen():void
+			{
+				if(serverSocket && serverSocket.listening) {
+					serverSocket.close();
+					serverSocket.removeEventListener(ServerSocketConnectEvent.CONNECT, socketConnectHandler);
+					serverSocket = null;
+					return;
+				}
+				
+				try
+				{
+					serverSocket = new ServerSocket();
+					serverSocket.addEventListener(ServerSocketConnectEvent.CONNECT, socketConnectHandler);
+					serverSocket.bind(Number(port.text));
+					serverSocket.listen();
+	//				log.text += "Listening on port " + port.text + "...\n";
+				}
+				catch (error:Error)
+				{
+					Alert.show("Port " + port.text +
+						" may be in use. Enter another port number and try again.\n(" +
+						error.message +")", "Error");
+					serverSocket = null;
+				}
+			}
+			
+			private function socketConnectHandler(event:ServerSocketConnectEvent):void
+			{
+//				trace(event);
+				var socket:Socket = event.socket;
+//				trace(socket.remoteAddress,socket.remotePort,socket.localAddress,socket.localPort);
+//				if(socket.localAddress==socket.remoteAddress)
+					socket.addEventListener(ProgressEvent.SOCKET_DATA, socketDataHandler);
+			}
+			
+			private var dico:Dictionary = new Dictionary();
+			private var messageQueue:Object = {};
+			private function socketDataHandler(event:ProgressEvent):void
+			{
+				var bytes:ByteArray = new ByteArray();
+				var response:String = "";
+				var socket:Socket = event.target as Socket;
+				socket.readBytes(bytes);
+				var request:String = "" + bytes;
+				//trace(request);
+				//*
+				//trace(request);
+
+				var requestLines:Array = request.split("\n");
+				trace(request,"\n----------");
+				var range:Array = null;
+				// preparse
+				for each(line in requestLines) {
+					lineSplit = line.split(" ");
+					switch(lineSplit[0]) {
+						case "Range:":
+							range = lineSplit[1].split("bytes=")[1].split("-");
+							range  = [parseInt(range[0]),parseInt(range[1])];
+							break;
+					}
+				}
+				
+				var path:String = null;
+				var method:String;
+				var params:String = null;
+				for each(var line:String in requestLines) {
+					var lineSplit:Array = line.split(" ");
+					switch(lineSplit[0]) {
+						case "GET":
+							var now:Number = new Date().time;
+							method = lineSplit[0];
+							path = decodeURI(lineSplit[1]);
+							var folder:File = File.userDirectory;
+							var target:File = folder.resolvePath(path.split("?")[0].substr(1));
+							var filename:String = (path.split("?")[0].split("/").pop());
+							
+							if(filename=="resume" && crash) {
+								crash = false;
+							}
+							
+							if(crash) {
+								response += "HTTP/1.1 404 Not Found\n";
+								response += "Content-Type: text/html\n\n";
+								response += "<html><body><h2>Page Not Found</h2></body></html>";
+								socket.writeUTFBytes(response);
+								return;
+							}
+							
+							var vars:URLVariables = null;
+							try {vars = new URLVariables(path.substr(1).split("/").pop().split("?")[1]);} catch(e:Error) {};
+							
+							// server files
+							if(target.exists) {
+								if(target.isDirectory) {
+									var indexFile:File = target.resolvePath("index.html");
+									if(indexFile.exists && path.charAt(path.length-1)!="/") {
+										target = indexFile;
+									}
+								}
+								if(!target.isDirectory) {
+//									if(!range) {
+										//range = [0,target.size];
+//									}
+									
+									var ext:String = filename.split(".").pop();
+									response += range?"HTTP/1.1 206 Partial content\n":"HTTP/1.1 200 OK\n";
+									if(range) {
+										var sizeSent:int = isNaN(range[1])?target.size-range[0]+1:Math.min(target.size,range[1])-range[0]+1;
+										sizeSent = Math.min(sizeSent,10000);
+										range[1] = sizeSent+range[0]-1;
+										
+										response += "Content-Range: bytes "+range[0]+"-"+range[1]+"/"+target.size+"\n";
+										response += "Content-Length: "+(range[1]-range[0]+1)+"\n";
+									}
+									response += "Accept-Ranges: bytes\n";
+									response += "Content-Type: "+mimeTypeMap.getMimeType(ext)+"\n\n";
+									
+									
+									socket.writeUTFBytes(response);
+									var fileStream:FileStream = new FileStream();
+									fileStream.openAsync(target,FileMode.READ);
+									dico[fileStream] = socket;
+									if(range) {
+										fileStream.position = range[0];
+									}
+									fileStream.addEventListener(ProgressEvent.PROGRESS,
+										function(e:ProgressEvent):void {
+											var fileStream:FileStream = e.currentTarget as FileStream;
+											var socket:Socket = dico[fileStream];
+											var b:ByteArray = new ByteArray();
+											fileStream.readBytes(b,0,!range?0:Math.min(1+range[1]-fileStream.position,fileStream.bytesAvailable));
+											if(socket.connected) {
+												socket.writeBytes(b);
+												socket.flush();
+											}
+											if(e.bytesLoaded==e.bytesTotal || !socket.connected || range && fileStream.position>range[1]) {
+												e.currentTarget.removeEventListener(e.type,arguments.callee);
+												fileStream.close();
+												if(socket.connected) {
+													socket.addEventListener(OutputProgressEvent.OUTPUT_PROGRESS,
+														function(e:OutputProgressEvent):void {
+															if(!e.bytesPending) {
+																socket.close();																
+															}
+														});
+												}
+												delete dico[socket];
+												delete dico[fileStream];
+											}
+										});
+									//trace(request);
+									//trace(response);
+									return;
+								}
+								else {
+									response += "HTTP/1.1 200 OK\n";
+									response += "Content-Type: text/html\n\n";
+									var files:Vector.<File> = new Vector.<File>();
+									for each(var f:File in target.getDirectoryListing()) {
+										files.push(f);
+									}
+									
+									if(!vars.sort)
+										vars.sort = 'name';
+									
+									if(vars.sort=="date") {
+										files.sort(
+											function(f1:File,f2:File):int {
+												return f1.modificationDate>f2.modificationDate?-1:f1.modificationDate<f2.modificationDate?1:0;
+											});
+									}
+									else if(vars.sort=="name") {
+									}
+									
+									if(vars.order=="descending") {
+										files.reverse();
+									}
+									response += "<table border=0 cellpadding=0 cellspacing=0>";
+									response += "<tr>";
+									
+									var html:String;
+									{
+										html = "<A href='?sort=name&order="+(vars.sort=='name'&&vars.order!='descending'?'descending':'')+"'>Name</a>";
+										if(vars.sort=='name')
+											html = "<b>"+html+"</b>";
+										html += vars.sort!='name'?'':vars.order=='descending'?' ^':' v';
+										html = "<td "+(vars.sort=='name'?'style=\'background-color:lightgray\'':'')+">"+html+"</td>";
+										response += html;
+									}
+									{
+										html = "<A href='?sort=date&order="+(vars.sort=='date'&&vars.order!='descending'?'descending':'')+"'>Modified</a>";
+										if(vars.sort=='date')
+											html = "<b>"+html+"</b>";
+										html += vars.sort!='date'?'':vars.order=='descending'?' ^':' v';
+										html = "<td "+(vars.sort=='date'?'style=\'background-color:lightgray\'':'')+">"+html+"</td>";
+										response += html;
+									}
+									for(var i:int=0;i<files.length;i++) {
+										f = files[i];
+										response += "<tr style=\'background-color:"+(i%2==0?'white':'#ECF2FE')+"\'>";
+										response += "<td><A href='/"+encodeURI(folder.getRelativePath(f,true))+"'>" + f.name + "</a></td>"+
+											"<td>"+f.modificationDate+"</td>"+
+											"\n";
+										response += "</tr>";
+									}
+									response += "</table>";
+									socket.writeUTFBytes(response);
+								}
+							}
+							else {	//	server special commands
+								switch(filename) {
+									case "sleep":
+										response += "HTTP/1.1 200 OK\n";
+										response += "Content-Type: text/html\n\n";
+										response += "Options:<br>\n";
+										if(vars.duration) {
+											sleep = vars.duration;
+											response += "dur:"+sleep+"\n";
+										}
+										socket.writeUTFBytes(response);
+										break;
+									case "crash":
+										crash = true;
+										break;
+									case "camsrc":
+										response += "HTTP/1.1 200 OK\n";
+										
+										
+										// handle clients
+										var takenow:Boolean = !imgbytes || now-lasttaken>1000 || vars && vars.client && clients[vars.client]==lasttaken;
+										
+										if(takenow) {
+											
+											if(vars) {
+												if(vars.jpg || !encoder) {
+													encoder = jpg;
+												}
+												else if(vars.png) {
+													encoder = png;
+												}
+												
+												if(vars.q && vars.q!=jpg.quality) {
+													jpg.quality = vars.q;
+												}
+												
+												if(vars.size && vars.size!=camerasize) {
+													camerasize = vars.size;
+													resetCamera();
+												}
+											}
+											
+											if(video && video.videoWidth && video.videoHeight && (video.videoWidth!=camera.width || video.videoHeight!=camera.height)) {
+												stopCamera(null);
+												combo.removeChild(video);
+												video = null;
+											}
+											
+											if(!video) {
+												video = new Video(camera.width,camera.height);
+												combo.addChild(video);
+												combo.addChild(tf);
+											}
+											
+											if(cambmp && (cambmp.width!=camera.width || cambmp.height!=camera.height)) {
+												cambmp.dispose();
+												cambmp = null;
+											}
+											
+											if(!cambmp) {
+												cambmp = new BitmapData(camera.width,camera.height);
+												//cambmp2 = new BitmapData(camera.width,camera.height);
+											}
+											
+											if(!attachTimer.running) {
+												video.attachCamera(camera);
+											}
+											
+											
+											//cambmp2.copyPixels(cambmp,cambmp.rect,new Point(0,0));
+											cambmp.draw(combo);
+											//cambmp2.draw(cambmp,null,null,BlendMode.DIFFERENCE);
+											
+											imgbytes = encoder.encode(cambmp);
+											
+											tf.text = cambmp.width+"x"+cambmp.height+"\n"+
+												"cam:"+Math.round(imgbytes.length/1024/(now-lasttaken)*1000*100*8)/100 + " kbps"+"\n"+
+												"server:"+Math.round(accuserver/1024/(now-lasttaken)*1000*100*8)/100 + " kbps"+"\n"+
+												"clients:"+numclients+"\n";
+											
+//											trace(Math.round(imgbytes.length/1024/(now-lasttaken)*1000*100*8)/100);
+											//cambmp.draw(tf);
+											//imgbytes = encoder.encode(cambmp);
+											
+											accuserver = 0;
+											
+											lasttaken = now;
+										}
+										accuserver += imgbytes.length;
+
+										if(vars && vars.client) {
+											clients[vars.client] = lasttaken; 
+											numclients = 0;
+											for(var c:String in clients) {
+												if(now-clients[c]>1000)
+													delete clients[c];
+												else
+													numclients++;
+											}
+										}
+										
+										response += "Content-Type: "+encoder.contentType+"\n\n";
+										socket.writeUTFBytes(response);
+										imgbytes.position = 0;
+										socket.writeBytes(imgbytes);
+										attachTimer.reset();
+										attachTimer.start();
+										break;
+									case "cam":
+										response += "HTTP/1.1 200 OK\n";
+										response += "Content-Type: text/html\n\n";
+										response += htmlCam;
+										socket.writeUTFBytes(response);
+										break;
+									case "cam2":
+										response += "HTTP/1.1 200 OK\n";
+										response += "Content-Type: text/html\n\n";
+										response += htmlCam.split("cam.jpg").join("cam.png");
+										socket.writeUTFBytes(response);
+										break;
+									case "getChat":
+										var sessionID:String = vars.sessionID;
+										if(!messageQueue[sessionID])
+											messageQueue[sessionID] = [];
+										response += "HTTP/1.1 200 OK\n";
+										response += "Content-Type: text/html\n\n";
+										response += JSON.stringify(messageQueue[sessionID])+"\n";
+										socket.writeUTFBytes(response);
+										messageQueue[sessionID] = [];
+										break;
+									case "sendChat":
+										var msg:Object = {};
+										for(var p:String in vars) {
+											msg[p] = vars[p];
+										}
+										for each(var array:Array in messageQueue) {
+											array.push(msg);
+										}
+										response += "HTTP/1.1 200 OK\n";
+										response += "Content-Type: text/html\n\n";
+										response += " ";
+										socket.writeUTFBytes(response);
+										break;
+									case "resume":
+										response += "HTTP/1.1 200 OK\n";
+										response += "Content-Type: text/html\n\n";
+										response += "Resuming server...";
+										socket.writeUTFBytes(response);
+										break;
+									default:
+										response += "HTTP/1.1 404 Not Found\n";
+										response += "Content-Type: text/html\n\n";
+										response += "<html><body><h2>Page Not Found</h2></body></html>";
+										socket.writeUTFBytes(response);
+										break;
+								}
+							}
+							break;
+					}
+				}
+				if(sleep) {
+					var timeout:int = setTimeout(
+						function():void {
+							clearTimeout(timeout);
+							if(socket.connected) {
+								socket.flush();
+								socket.close();
+							}
+							delete dico[socket];
+							socket = null;
+						},sleep);
+				}
+				else {
+					socket.flush();
+					socket.close();
+					delete dico[socket];
+				}
+//				trace("here");
+				
+				
+				return;
+				/*/
+				try {
+					var requestLines:Array = request.split("\n");
+					var path:String = null;
+					var method:String;
+					var params:String = null;
+					for each(var line:String in requestLines) {
+						var lineSplit:Array = line.split(" ");
+						switch(lineSplit[0]) {
+							case "Content-Length:":
+								if(method=="POST") {
+									var contentLength:int = parseInt(lineSplit[1]);
+									bytes.position = bytes.length-contentLength;
+									params = bytes.readUTFBytes(contentLength);
+									break;
+								}
+								break;
+							case "GET":
+								method = lineSplit[0];
+								path = lineSplit[1];
+								if(path) {
+									params = path.split("?")[1];
+								}
+								break;
+							case "POST":
+								method = lineSplit[0];
+								path = lineSplit[1];
+								break;
+						}
+					}
+					
+					if(path=="/") {
+						response += "HTTP/1.1 200 OK\n";
+						response += "Content-Type: text/html\n\n";
+						response += htmlApp;
+					}
+					else if(params) {
+						var coordinates:Array = params.split(",");
+						if(coordinates.length==2) {
+							response += "HTTP/1.1 200 OK\n";
+							if(method=="GET") {
+								response += "Cache-Control: no-cache\n";
+								response += "Pragma: no-cache\n";
+								response += "Expires: 0\n";
+							}
+							smiley.x += parseInt(coordinates[0])*Math.abs(parseInt(coordinates[0]))/10;
+							smiley.y += parseInt(coordinates[1])*Math.abs(parseInt(coordinates[1]))/10;
+							//trace(coordinates);
+						}
+					}
+				}
+				catch(error:Error) {
+				}
+				
+				//*/
+				
+				if(!response.length) {
+					response += "HTTP/1.1 404 Not Found\n";
+					response += "Content-Type: text/html\n\n";
+					response += "<html><body><h2>Page Not Found</h2></body></html>";
+				}
+				socket.writeUTFBytes(response);
+				socket.flush();
+				socket.close();
+			}
+			
+		]]>
+	</fx:Script>
+	
+	<s:HGroup verticalAlign="middle">
+		<s:Label text="Port:"/>
+		<s:TextInput id="port" text="8888" width="50"/>
+		<s:Button label="{serverSocket==null?'Listen':'Stop'}" click="listen()"/>
+	</s:HGroup>
+	
+	<s:Graphic horizontalCenter="0" verticalCenter="0">
+		<s:Ellipse id="ellipse" height="100" width="100">
+			<s:stroke>
+				<s:SolidColorStroke color="0x000000" weight="2"/>
+			</s:stroke>
+		</s:Ellipse>
+		<s:Image id="smiley" width="50" height="50" source="SmileyFace.png"/>
+	</s:Graphic>
+	<!--s:TextArea id="log" width="500" height="800"  /-->
+</s:WindowedApplication>
